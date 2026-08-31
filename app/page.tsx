@@ -70,7 +70,7 @@ export default function Home() {
 
   return <main className="shell">
     <aside className="sidebar">
-      <a className="logo" href="#top" aria-label="MarkItDown home"><span>MI</span>MarkItDown</a>
+      <a className="logo" href="#top" aria-label="MarkItDown v1 home"><span>MI</span>MarkItDown <span style={{ background: "transparent", width: "auto", height: "auto", color: "#9c9992", fontSize: "10px", letterSpacing: ".08em", textTransform: "uppercase", marginLeft: "-3px" }}>v1</span></a>
       <div className="sidebar-label">Private conversion</div>
       <p className="empty-history">Files are processed only to create your download. Nothing is kept on the server.</p>
       <div className="sidebar-footer">No history · No accounts<br />Powered by MarkItDown + OCR</div>
