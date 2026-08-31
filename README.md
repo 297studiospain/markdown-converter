@@ -52,7 +52,6 @@ The API listens only on `127.0.0.1:5000`.
 In a second terminal, from the repository root:
 
 ```bash
-cd nextjs
 npm install
 npm run dev
 ```
@@ -64,12 +63,11 @@ Open [http://localhost:3000](http://localhost:3000).
 Create an optimized Next.js build with:
 
 ```bash
-cd nextjs
 npm run build
 npm run start
 ```
 
-The Next.js app proxies `/api/*` to `http://127.0.0.1:5000`. For deployment, run the Flask API on the same private host/network or update the proxy destination in [`nextjs/next.config.ts`](nextjs/next.config.ts). Put the public site behind HTTPS and a reverse proxy.
+The Next.js app proxies `/api/*` to `http://127.0.0.1:5000`. For deployment, run the Flask API on the same private host/network or update the proxy destination in [`next.config.ts`](next.config.ts). Put the public site behind HTTPS and a reverse proxy.
 
 ## API
 
@@ -105,10 +103,10 @@ For an internet-facing installation, deploy behind a reverse proxy with TLS and 
 ```text
 .
 ├── app.py                 # Flask conversion API and security controls
+├── app/                   # Next.js page and styles
+├── package.json           # JavaScript dependencies and scripts
 ├── requirements.txt       # Python dependencies
-└── nextjs/                # Next.js user interface
-    ├── app/               # Page and styles
-    └── next.config.ts     # API proxy and browser security headers
+└── next.config.ts         # API proxy and browser security headers
 ```
 
 ## Contributing
@@ -116,7 +114,7 @@ For an internet-facing installation, deploy behind a reverse proxy with TLS and 
 Issues and pull requests are welcome. Please keep changes focused, avoid committing user documents or generated Markdown, and run the checks below before opening a pull request:
 
 ```bash
-cd nextjs && npm run build
+npm run build
 python3 -m py_compile app.py
 ```
 

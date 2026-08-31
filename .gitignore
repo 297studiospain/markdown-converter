@@ -11,8 +11,8 @@ __pycache__/
 *.key
 Archivos subidos/
 Docu markDOWN/
-nextjs/node_modules/
-nextjs/.next/
-nextjs/out/
+node_modules/
+.next/
+out/
 npm-debug.log*
 *.log
