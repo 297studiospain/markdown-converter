@@ -2,10 +2,12 @@
 
 import { ChangeEvent, DragEvent, useRef, useState } from "react";
 import { marked } from "marked";
+import packageMetadata from "../package.json";
 
 type Mode = "file" | "url";
 
 const emptyMarkdown = `# Ready when you are\n\nDrop a document or paste a URL to turn it into clean Markdown.\n\n- PDF, Word, Excel and PowerPoint\n- Images and scanned documents with OCR\n- Web pages and links`;
+const appVersion = `v${packageMetadata.version.split(".")[0]}`;
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("file");
@@ -70,7 +72,7 @@ export default function Home() {
 
   return <main className="shell">
     <aside className="sidebar">
-      <a className="logo" href="#top" aria-label="MarkItDown v1 home"><span>MI</span>MarkItDown <span style={{ background: "transparent", width: "auto", height: "auto", color: "#9c9992", fontSize: "10px", letterSpacing: ".08em", textTransform: "uppercase", marginLeft: "-3px" }}>v1</span></a>
+      <a className="logo" href="#top" aria-label={`MarkItDown ${appVersion} home`}><span>MI</span>MarkItDown <span style={{ background: "transparent", width: "auto", height: "auto", color: "#9c9992", fontSize: "10px", letterSpacing: ".08em", textTransform: "uppercase", marginLeft: "-3px" }}>{appVersion}</span></a>
       <div className="sidebar-label">Private conversion</div>
       <p className="empty-history">Files are processed only to create your download. Nothing is kept on the server.</p>
       <div className="sidebar-footer">No history · No accounts<br />Powered by MarkItDown + OCR</div>
