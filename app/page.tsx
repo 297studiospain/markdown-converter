@@ -1,7 +1,6 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useRef, useState } from "react";
-import { marked } from "marked";
 import packageMetadata from "../package.json";
 
 type Mode = "file" | "url";
@@ -173,15 +172,7 @@ export default function Home() {
             <span>Markdown output</span>
             <span>{markdown.length.toLocaleString()} characters</span>
           </div>
-          <div className="split">
-            <pre className="code"><code>{markdown}</code></pre>
-            <iframe
-              className="preview"
-              title="Markdown preview"
-              sandbox=""
-              srcDoc={`<!doctype html><html><head><style>body{font-family:Arial,sans-serif;color:#151515;line-height:1.55;padding:24px}h1,h2,h3{line-height:1.08}pre{background:#f4f2ed;padding:14px;overflow:auto}code{font-family:ui-monospace,monospace}a{color:#e14926}</style></head><body>${marked.parse(markdown, { async: false })}</body></html>`}
-            />
-          </div>
+          <pre className="code"><code>{markdown}</code></pre>
         </section>
       </section>
     </main>
