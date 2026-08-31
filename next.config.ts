@@ -2,6 +2,9 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   async rewrites() {
+    // In production Vercel sends /api/* to api/index.py. Locally, the
+    // separate Flask process remains available at port 5000 for `npm run dev`.
+    if (process.env.VERCEL) return [];
     return [{ source: "/api/:path*", destination: "http://127.0.0.1:5000/api/:path*" }];
   },
   async headers() {

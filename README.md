@@ -67,7 +67,13 @@ npm run build
 npm run start
 ```
 
-The Next.js app proxies `/api/*` to `http://127.0.0.1:5000`. For deployment, run the Flask API on the same private host/network or update the proxy destination in [`next.config.ts`](next.config.ts). Put the public site behind HTTPS and a reverse proxy.
+For local development, Next.js proxies `/api/*` to `http://127.0.0.1:5000`. On Vercel, [`vercel.json`](vercel.json) routes those same paths to the Python Flask Function in [`api/index.py`](api/index.py), so the site and converter run on one domain.
+
+### Deploy on Vercel
+
+Import this repository with the **Root Directory** left empty. Vercel installs the JavaScript dependencies, detects the Next.js interface and packages `api/index.py` with the packages in `requirements.txt`. Each push to `main` then creates a new production deployment.
+
+Vercel Functions have execution-time and bundle-size limits. Small documents and normal web pages are appropriate for this deployment; very large or OCR-heavy conversions are better hosted on a dedicated Python service.
 
 ## API
 
@@ -104,9 +110,11 @@ For an internet-facing installation, deploy behind a reverse proxy with TLS and 
 .
 ├── app.py                 # Flask conversion API and security controls
 ├── app/                   # Next.js page and styles
+├── api/index.py           # Vercel Python Function entry point
 ├── package.json           # JavaScript dependencies and scripts
 ├── requirements.txt       # Python dependencies
-└── next.config.ts         # API proxy and browser security headers
+├── next.config.ts         # Local API proxy and browser security headers
+└── vercel.json            # Vercel API routing and function exclusions
 ```
 
 ## Contributing
