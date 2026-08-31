@@ -26,13 +26,13 @@ MAX_TRACKED_CLIENTS = 10_000
 MAX_URL_BYTES = 10 * 1024 * 1024
 MAX_REDIRECTS = 3
 ALLOWED_EXTENSIONS = {
-    # Microsoft MarkItDown document formats
-    '.docx', '.pdf', '.xlsx', '.xls', '.pptx', '.csv', '.ipynb', '.msg', '.epub', '.zip',
-    # Text and markup formats
+    # Core formats exposed in the interface.
+    '.pdf', '.docx', '.xls', '.xlsx', '.csv', '.pptx',
+    '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp',
+    # Additional MarkItDown text and document formats.
     '.txt', '.text', '.md', '.markdown', '.json', '.jsonl', '.html', '.htm',
     '.xml', '.yaml', '.yml', '.toml', '.ini', '.log', '.tsv', '.rtf',
-    # Images and media (OCR/transcription is used where available)
-    '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.mp3', '.wav', '.m4a', '.mp4',
+    '.ipynb', '.msg', '.epub', '.zip', '.mp3', '.wav', '.m4a', '.mp4',
 }
 _upload_attempts = OrderedDict()
 _upload_lock = Lock()
@@ -421,13 +421,11 @@ def convert_file():
         return jsonify({'error': 'Nombre de archivo vacío'}), 400
 
     try:
-        # The upload is written only into an OS temporary directory while
-        # MarkItDown processes it. TemporaryDirectory removes it immediately.
         original_name = secure_filename(file.filename)
         title, ext = sanitize_title(original_name)
         ext = ext.lower()
         if ext not in ALLOWED_EXTENSIONS:
-            return jsonify({'error': 'Formato no compatible. Prueba con PDF, DOCX, XLSX, PPTX, CSV, EPUB, ZIP, imágenes, audio o archivos de texto.'}), 400
+            return jsonify({'error': 'Formato no compatible. Usa PDF, DOCX, XLS/XLSX, CSV, PPTX, PNG, JPG, WEBP, BMP o TIFF.'}), 400
         if not title:
             title = 'documento'
 
@@ -440,25 +438,33 @@ def convert_file():
             response.headers['Retry-After'] = str(remaining)
             return response, 429
 
-        with TemporaryDirectory(prefix='markitdown-') as temp_dir:
-            file_path = os.path.join(temp_dir, original_name or f'documento{ext}')
-            file.save(file_path)
-            try:
-                result = markitdown.convert(file_path)
-                markdown_text = result.text_content
-            except Exception as conversion_error:
-                markdown_text = run_ocr_fallback(file_path, ext)
-                if not markdown_text:
-                    raise conversion_error
+        # The primary conversion works entirely in memory. This is more reliable
+        # in Vercel Functions and means the uploaded file is never persisted.
+        file_bytes = file.read()
+        if not file_bytes:
+            return jsonify({'error': 'El archivo está vacío.'}), 400
 
-            if not markdown_text or not markdown_text.strip():
-                ocr_text = run_ocr_fallback(file_path, ext)
-                if ocr_text:
-                    markdown_text = ocr_text
-                elif ext.lower() == '.pdf':
-                    markdown_text = "⚠️ **Aviso de conversión:**\n\nEl archivo PDF no contiene ninguna capa de texto digital legible y la extracción por OCR falló."
-                else:
-                    markdown_text = f"⚠️ **Aviso de conversión:**\n\nEl archivo '{original_name}' no contiene texto digital legible."
+        markdown_text = None
+        conversion_error = None
+        try:
+            result = markitdown.convert_stream(BytesIO(file_bytes), file_extension=ext)
+            markdown_text = result.text_content
+        except Exception as error:
+            conversion_error = error
+
+        # OCR is only a fallback for scanned PDFs and images. It needs a local
+        # path, which is created in an OS temporary directory and removed at once.
+        if (not markdown_text or not markdown_text.strip()) and ext in {'.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}:
+            with TemporaryDirectory(prefix='markitdown-') as temp_dir:
+                file_path = os.path.join(temp_dir, original_name or f'documento{ext}')
+                with open(file_path, 'wb') as temp_file:
+                    temp_file.write(file_bytes)
+                markdown_text = run_ocr_fallback(file_path, ext)
+
+        if not markdown_text or not markdown_text.strip():
+            if conversion_error:
+                app.logger.info('Unsupported or unreadable %s upload: %s', ext, type(conversion_error).__name__)
+            return jsonify({'error': 'No se ha podido extraer texto de este archivo. Comprueba que no esté protegido con contraseña o dañado.'}), 422
 
         return jsonify({
             'success': True,
