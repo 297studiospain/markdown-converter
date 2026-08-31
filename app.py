@@ -26,8 +26,13 @@ MAX_TRACKED_CLIENTS = 10_000
 MAX_URL_BYTES = 10 * 1024 * 1024
 MAX_REDIRECTS = 3
 ALLOWED_EXTENSIONS = {
-    '.docx', '.pdf', '.rtf', '.txt', '.html', '.htm', '.xlsx', '.xls',
-    '.pptx', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.mp3', '.wav',
+    # Microsoft MarkItDown document formats
+    '.docx', '.pdf', '.xlsx', '.xls', '.pptx', '.csv', '.ipynb', '.msg', '.epub', '.zip',
+    # Text and markup formats
+    '.txt', '.text', '.md', '.markdown', '.json', '.jsonl', '.html', '.htm',
+    '.xml', '.yaml', '.yml', '.toml', '.ini', '.log', '.tsv', '.rtf',
+    # Images and media (OCR/transcription is used where available)
+    '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.mp3', '.wav', '.m4a', '.mp4',
 }
 _upload_attempts = OrderedDict()
 _upload_lock = Lock()
@@ -408,13 +413,6 @@ def run_ocr_fallback(file_path, ext):
 @app.route('/api/convert', methods=['POST'])
 def convert_file():
     client_id = request.remote_addr or 'unknown'
-    remaining = upload_cooldown_remaining(client_id)
-    if remaining:
-        response = jsonify({'error': f'Espera {remaining} segundos antes de subir otro archivo.',
-                            'retry_after_seconds': remaining})
-        response.headers['Retry-After'] = str(remaining)
-        return response, 429
-
     if 'file' not in request.files:
         return jsonify({'error': 'No se proporcionó ningún archivo'}), 400
 
@@ -429,9 +427,19 @@ def convert_file():
         title, ext = sanitize_title(original_name)
         ext = ext.lower()
         if ext not in ALLOWED_EXTENSIONS:
-            return jsonify({'error': 'Formato de archivo no permitido.'}), 400
+            return jsonify({'error': 'Formato no compatible. Prueba con PDF, DOCX, XLSX, PPTX, CSV, EPUB, ZIP, imágenes, audio o archivos de texto.'}), 400
         if not title:
             title = 'documento'
+
+        # Invalid files do not consume the cooldown; only a conversion attempt
+        # that will use server resources is rate limited.
+        remaining = upload_cooldown_remaining(client_id)
+        if remaining:
+            response = jsonify({'error': f'Espera {remaining} segundos antes de subir otro archivo.',
+                                'retry_after_seconds': remaining})
+            response.headers['Retry-After'] = str(remaining)
+            return response, 429
+
         with TemporaryDirectory(prefix='markitdown-') as temp_dir:
             file_path = os.path.join(temp_dir, original_name or f'documento{ext}')
             file.save(file_path)
