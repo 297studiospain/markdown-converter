@@ -40,12 +40,12 @@ export default function Home() {
 
   const handleFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) { setSelectedFile(file); setStatus(`${file.name} ready to download`); }
+    if (file) { setSelectedFile(file); void convertFile(file); }
     event.target.value = "";
   };
   const handleDrop = (event: DragEvent<HTMLButtonElement>) => {
     event.preventDefault(); const file = event.dataTransfer.files[0];
-    if (file) { setSelectedFile(file); setStatus(`${file.name} ready to download`); }
+    if (file) { setSelectedFile(file); void convertFile(file); }
   };
   const convertUrl = async () => {
     if (!url.trim()) return;
