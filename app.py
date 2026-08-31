@@ -1,20 +1,15 @@
+import ipaddress
 import os
 import re
-import warnings
-import ipaddress
 import socket
 from collections import OrderedDict
 from io import BytesIO
-from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
 from urllib.parse import urljoin, urlparse
 
 import requests
-# Suppress warning from pydub regarding missing ffmpeg/avconv since audio conversion is optional
-warnings.filterwarnings("ignore", category=RuntimeWarning, message="Couldn't find ffmpeg or avconv")
-
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 from markitdown import MarkItDown
 from werkzeug.utils import secure_filename
 
@@ -26,18 +21,21 @@ MAX_TRACKED_CLIENTS = 10_000
 MAX_URL_BYTES = 10 * 1024 * 1024
 MAX_REDIRECTS = 3
 ALLOWED_EXTENSIONS = {
-    # Core formats exposed in the interface.
     '.pdf', '.docx', '.xls', '.xlsx', '.csv', '.pptx',
     '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp',
-    # Additional MarkItDown text and document formats.
     '.txt', '.text', '.md', '.markdown', '.json', '.jsonl', '.html', '.htm',
     '.xml', '.yaml', '.yml', '.toml', '.ini', '.log', '.tsv', '.rtf',
     '.ipynb', '.msg', '.epub', '.zip', '.mp3', '.wav', '.m4a', '.mp4',
 }
+CONTENT_TYPE_EXTENSIONS = {
+    'text/html': '.html',
+    'application/pdf': '.pdf',
+    'text/plain': '.txt',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+}
+
 _upload_attempts = OrderedDict()
 _upload_lock = Lock()
-
-# Initialize MarkItDown converter
 markitdown = MarkItDown()
 
 
@@ -93,11 +91,9 @@ def validate_public_url(raw_url):
 def fetch_public_url(raw_url):
     """Fetch an external URL while validating every redirect to prevent SSRF."""
     current_url = raw_url
-    headers = {'User-Agent': 'MarkItDown Converter/1.0'}
     for _ in range(MAX_REDIRECTS + 1):
         validate_public_url(current_url)
-        response = requests.get(current_url, headers=headers, timeout=(5, 20),
-                                allow_redirects=False, stream=True)
+        response = requests.get(current_url, headers={'User-Agent': 'MarkItDown Converter/1.0'}, timeout=(5, 20), allow_redirects=False, stream=True)
         if response.is_redirect or response.is_permanent_redirect:
             location = response.headers.get('Location')
             response.close()
@@ -119,395 +115,66 @@ def fetch_public_url(raw_url):
     raise ValueError('La URL supera el límite de redirecciones.')
 
 
-def extension_for_url_content(url, content_type):
-    content_type_extensions = {
-        'text/html': '.html', 'application/pdf': '.pdf', 'text/plain': '.txt',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-    }
-    suffix = os.path.splitext(urlparse(url).path)[1].lower()
-    return suffix if suffix in ALLOWED_EXTENSIONS else content_type_extensions.get(content_type, '.html')
-
-def sanitize_title(filename):
-    # Split filename and extension
-    name, ext = os.path.splitext(filename)
-    # Remove special characters, keep alphanumeric, spaces, hyphens, underscores
+def filename_parts(filename):
+    name, extension = os.path.splitext(secure_filename(filename))
     name = re.sub(r'[^\w\s-]', '', name)
-    # Replace multiple spaces/hyphens with a single hyphen
-    name = re.sub(r'[-\s]+', '-', name).strip('-')
-    return name, ext
-
-MARKDOWN_PREFIX_RE = re.compile(r'^(#{1,6}\s+|>|[-*+]\s+|\d+[.)]\s+|```|\|)')
-ORDERED_HEADING_RE = re.compile(r'^((?:\d+[.)])(?:\s*\d+[.)]?){0,5})\s+(.+)$')
-LIST_RE = re.compile(r'^(?:[-*+•‣▪])\s+(.+)$')
+    name = re.sub(r'[-\s]+', '-', name).strip('-') or 'documento'
+    return name, extension.lower()
 
 
-def numbered_heading_level(text):
-    """Return a heading level for outline numbering (1, 1.2, 1.2.3…), if present."""
-    match = ORDERED_HEADING_RE.match(text)
-    if not match:
-        return None
-    marker = match.group(1)
-    # The number of outline components maps directly to H1–H6.
-    return min(6, len(re.findall(r'\d+', marker)))
+def extension_for_url_content(url, content_type):
+    suffix = os.path.splitext(urlparse(url).path)[1].lower()
+    return suffix if suffix in ALLOWED_EXTENSIONS else CONTENT_TYPE_EXTENSIONS.get(content_type, '.html')
 
 
-def looks_like_heading(text):
-    """Conservative fallback for OCR text that has no size metadata."""
-    if len(text) > 72 or text.endswith(('.', ',', ';', ':', '?', '!')):
-        return False
-    if MARKDOWN_PREFIX_RE.match(text):
-        return False
-    letters = [char for char in text if char.isalpha()]
-    if not letters:
-        return False
-    upper_ratio = sum(char.isupper() for char in letters) / len(letters)
-    # OCR often turns display headings into all caps; title case is intentionally
-    # not promoted to avoid converting ordinary prose into an H3.
-    return upper_ratio >= 0.85 and len(text.split()) <= 12
-
-
-def markdown_from_lines(lines, heading_levels=None):
-    """Build Markdown blocks without flattening lists, quotes, tables or headings."""
-    blocks, paragraph = [], []
-    heading_levels = heading_levels or {}
-
-    def flush_paragraph():
-        if paragraph:
-            blocks.append(' '.join(paragraph))
-            paragraph.clear()
-
-    for index, raw_line in enumerate(lines):
-        text = raw_line.strip()
-        if not text:
-            flush_paragraph()
-            continue
-
-        bullet = LIST_RE.match(text)
-        if bullet:
-            flush_paragraph()
-            blocks.append(f"- {bullet.group(1).strip()}")
-            continue
-
-        heading_level = heading_levels.get(index) or numbered_heading_level(text)
-        # A single number can also be an ordered-list marker. Promote it only
-        # when it looks like a section label; nested outline numbers are always
-        # treated as structural headings.
-        if heading_level == 1:
-            label = re.sub(r'^\d+[.)]\s*', '', text)
-            if len(label) > 72 or label.endswith(('.', ',', ';', ':')):
-                heading_level = None
-        if not heading_level and looks_like_heading(text):
-            heading_level = 2
-        if heading_level:
-            flush_paragraph()
-            blocks.append(f"{'#' * heading_level} {text}")
-        elif MARKDOWN_PREFIX_RE.match(text):
-            flush_paragraph()
-            blocks.append(text)
-        else:
-            paragraph.append(text)
-
-    flush_paragraph()
-    return '\n\n'.join(blocks)
-
-
-def format_text_to_markdown(raw_text):
-    if not raw_text:
-        return ""
-    return markdown_from_lines(raw_text.splitlines())
-
-
-def reconstruct_markdown_from_ocr(boxes, txts, scores):
-    if not txts:
-        return ""
-
-    items = []
-    heights = []
-    for i, (box, text, score) in enumerate(zip(boxes, txts, scores)):
-        x_coords = [p[0] for p in box]
-        y_coords = [p[1] for p in box]
-        xmin, xmax = min(x_coords), max(x_coords)
-        ymin, ymax = min(y_coords), max(y_coords)
-        height = ymax - ymin
-        width = xmax - xmin
-        cx = xmin + width / 2.0
-        cy = ymin + height / 2.0
-
-        items.append({
-            'index': i,
-            'text': text.strip(),
-            'xmin': xmin,
-            'xmax': xmax,
-            'ymin': ymin,
-            'ymax': ymax,
-            'height': height,
-            'width': width,
-            'cx': cx,
-            'cy': cy,
-            'score': score
-        })
-        heights.append(height)
-
-    # Calculate median height
-    sorted_heights = sorted(heights)
-    n_heights = len(sorted_heights)
-    if n_heights > 0:
-        if n_heights % 2 == 1:
-            avg_height = sorted_heights[n_heights // 2]
-        else:
-            avg_height = (sorted_heights[n_heights // 2 - 1] + sorted_heights[n_heights // 2]) / 2.0
-    else:
-        avg_height = 12.0
-
-    # Sort items by vertical center (cy)
-    items.sort(key=lambda x: x['cy'])
-
-    # Group items into lines
-    lines = []
-    current_line = []
-    for item in items:
-        if not current_line:
-            current_line.append(item)
-        else:
-            prev_item = current_line[-1]
-            vertical_diff = abs(item['cy'] - prev_item['cy'])
-            line_height_limit = max(prev_item['height'], item['height']) * 0.75
-
-            if vertical_diff < line_height_limit:
-                current_line.append(item)
-            else:
-                lines.append(current_line)
-                current_line = [item]
-    if current_line:
-        lines.append(current_line)
-
-    # Process each visual line while preserving its typographic information.
-    visual_lines = []
-    for line in lines:
-        # Sort items in the line from left to right
-        line.sort(key=lambda x: x['xmin'])
-
-        if len(line) > 1:
-            # Calculate horizontal gaps
-            gaps = []
-            for i in range(len(line) - 1):
-                gaps.append(line[i+1]['xmin'] - line[i]['xmax'])
-
-            max_gap = max(gaps) if gaps else 0
-
-            # If columns are far apart and all texts are short (< 30 chars), treat as table
-            is_table_like = all(len(item['text']) < 30 for item in line) and max_gap > avg_height * 2.0
-
-            if is_table_like:
-                visual_lines.append({
-                    'text': "| " + " | ".join(item['text'] for item in line) + " |",
-                    'height': max(item['height'] for item in line),
-                    'table': True,
-                })
-            else:
-                visual_lines.append({
-                    'text': " ".join(item['text'] for item in line),
-                    'height': max(item['height'] for item in line),
-                    'table': False,
-                })
-        else:
-            item = line[0]
-            visual_lines.append({'text': item['text'], 'height': item['height'], 'table': False})
-
-    output, paragraph, table_rows = [], [], []
-    # Heading levels in scanned material are encoded primarily by font size.
-    # Rank the distinct sizes above body text instead of assigning every large
-    # line the same H2/H3 level; this preserves H1–H6 hierarchy when present.
-    heading_sizes = sorted({round(line['height'], 1) for line in visual_lines
-                            if not line['table'] and line['height'] >= avg_height * 1.05}, reverse=True)
-    size_levels = {size: min(6, index + 1) for index, size in enumerate(heading_sizes[:6])}
-
-    def flush_paragraph():
-        if paragraph:
-            output.append(markdown_from_lines(paragraph))
-            paragraph.clear()
-
-    def flush_table():
-        if table_rows:
-            first_row = table_rows[0]
-            columns = len(first_row.split('|')) - 2
-            output.append(first_row)
-            output.append('|' + ' --- |' * columns)
-            output.extend(table_rows[1:])
-            table_rows.clear()
-
-    for line in visual_lines:
-        text = line['text'].strip()
-        if not text:
-            continue
-        if line['table']:
-            flush_paragraph()
-            table_rows.append(text)
-            continue
-        flush_table()
-
-        explicit_level = numbered_heading_level(text)
-        if explicit_level:
-            flush_paragraph()
-            output.append(f"{'#' * explicit_level} {text}")
-            continue
-
-        # OCR bounding-box height gives a much stronger heading signal than case.
-        level = size_levels.get(round(line['height'], 1))
-        if not level and looks_like_heading(text):
-            level = 3
-
-        if level and not MARKDOWN_PREFIX_RE.match(text):
-            flush_paragraph()
-            output.append(f"{'#' * level} {text}")
-        elif MARKDOWN_PREFIX_RE.match(text) or LIST_RE.match(text):
-            flush_paragraph()
-            output.append(markdown_from_lines([text]))
-        else:
-            paragraph.append(text)
-
-    flush_paragraph()
-    flush_table()
-    return '\n\n'.join(part for part in output if part)
-
-
-def run_ocr_fallback(file_path, ext):
-    ext_lower = ext.lower()
-    if ext_lower == '.pdf':
-        try:
-            from rapidocr_pdf import RapidOCRPDF
-            pdf_extracter = RapidOCRPDF()
-            pages = pdf_extracter(file_path)
-            if pages:
-                ocr_pages = []
-                for page in pages:
-                    if isinstance(page, list) and len(page) >= 2:
-                        ocr_pages.append(format_text_to_markdown(page[1]))
-                return "\n\n---\n\n".join(ocr_pages)
-        except Exception as e:
-            print(f"Error in PDF OCR: {e}")
-    elif ext_lower in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp']:
-        try:
-            from rapidocr import RapidOCR
-            engine = RapidOCR()
-            result = engine(file_path)
-            if result:
-                if hasattr(result, 'boxes') and hasattr(result, 'txts') and hasattr(result, 'scores'):
-                    return reconstruct_markdown_from_ocr(result.boxes, result.txts, result.scores)
-                elif isinstance(result, list):
-                    boxes = [line[0] for line in result if isinstance(line, list) and len(line) >= 3]
-                    txts = [line[1] for line in result if isinstance(line, list) and len(line) >= 3]
-                    scores = [line[2] for line in result if isinstance(line, list) and len(line) >= 3]
-                    if boxes and txts:
-                        return reconstruct_markdown_from_ocr(boxes, txts, scores)
-                    else:
-                        lines = [line[1] for line in result if isinstance(line, list) and len(line) >= 2]
-                        return format_text_to_markdown("\n".join(lines))
-                elif hasattr(result, 'txts') and result.txts:
-                    return format_text_to_markdown("\n".join(result.txts))
-        except Exception as e:
-            print(f"Error in Image OCR: {e}")
-    return None
+def convert_bytes(content, extension, url=None):
+    result = markitdown.convert_stream(BytesIO(content), file_extension=extension, url=url)
+    if not result.text_content or not result.text_content.strip():
+        raise ValueError('No se ha podido extraer texto de este archivo. Comprueba que no esté protegido con contraseña o dañado.')
+    return result
 
 
 @app.route('/api/convert', methods=['POST'])
 def convert_file():
-    client_id = request.remote_addr or 'unknown'
     if 'file' not in request.files:
         return jsonify({'error': 'No se proporcionó ningún archivo'}), 400
-
-    file = request.files['file']
-    if file.filename == '':
+    uploaded_file = request.files['file']
+    if not uploaded_file.filename:
         return jsonify({'error': 'Nombre de archivo vacío'}), 400
 
+    title, extension = filename_parts(uploaded_file.filename)
+    if extension not in ALLOWED_EXTENSIONS:
+        return jsonify({'error': 'Formato no compatible. Usa PDF, DOCX, XLS/XLSX, CSV, PPTX, PNG, JPG, WEBP, BMP o TIFF.'}), 400
+    remaining = upload_cooldown_remaining(request.remote_addr or 'unknown')
+    if remaining:
+        response = jsonify({'error': f'Espera {remaining} segundos antes de subir otro archivo.', 'retry_after_seconds': remaining})
+        response.headers['Retry-After'] = str(remaining)
+        return response, 429
+
+    content = uploaded_file.read()
+    if not content:
+        return jsonify({'error': 'El archivo está vacío.'}), 400
     try:
-        original_name = secure_filename(file.filename)
-        title, ext = sanitize_title(original_name)
-        ext = ext.lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            return jsonify({'error': 'Formato no compatible. Usa PDF, DOCX, XLS/XLSX, CSV, PPTX, PNG, JPG, WEBP, BMP o TIFF.'}), 400
-        if not title:
-            title = 'documento'
-
-        # Invalid files do not consume the cooldown; only a conversion attempt
-        # that will use server resources is rate limited.
-        remaining = upload_cooldown_remaining(client_id)
-        if remaining:
-            response = jsonify({'error': f'Espera {remaining} segundos antes de subir otro archivo.',
-                                'retry_after_seconds': remaining})
-            response.headers['Retry-After'] = str(remaining)
-            return response, 429
-
-        # The primary conversion works entirely in memory. This is more reliable
-        # in Vercel Functions and means the uploaded file is never persisted.
-        file_bytes = file.read()
-        if not file_bytes:
-            return jsonify({'error': 'El archivo está vacío.'}), 400
-
-        markdown_text = None
-        conversion_error = None
-        try:
-            result = markitdown.convert_stream(BytesIO(file_bytes), file_extension=ext)
-            markdown_text = result.text_content
-        except Exception as error:
-            conversion_error = error
-
-        # OCR is only a fallback for scanned PDFs and images. It needs a local
-        # path, which is created in an OS temporary directory and removed at once.
-        if (not markdown_text or not markdown_text.strip()) and ext in {'.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}:
-            with TemporaryDirectory(prefix='markitdown-') as temp_dir:
-                file_path = os.path.join(temp_dir, original_name or f'documento{ext}')
-                with open(file_path, 'wb') as temp_file:
-                    temp_file.write(file_bytes)
-                markdown_text = run_ocr_fallback(file_path, ext)
-
-        if not markdown_text or not markdown_text.strip():
-            if conversion_error:
-                app.logger.info('Unsupported or unreadable %s upload: %s', ext, type(conversion_error).__name__)
-            return jsonify({'error': 'No se ha podido extraer texto de este archivo. Comprueba que no esté protegido con contraseña o dañado.'}), 422
-
-        return jsonify({
-            'success': True,
-            'download_name': f"{title}.md",
-            'markdown': markdown_text,
-        })
-
+        result = convert_bytes(content, extension)
+        return jsonify({'success': True, 'download_name': f'{title}.md', 'markdown': result.text_content})
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 422
     except Exception as error:
         app.logger.exception('File conversion failed: %s', error)
         return jsonify({'error': 'No se ha podido convertir el archivo.'}), 500
 
+
 @app.route('/api/convert-url', methods=['POST'])
 def convert_url():
     try:
-        data = request.get_json() or {}
-        url = data.get('url')
+        url = (request.get_json() or {}).get('url')
         if not url:
             return jsonify({'error': 'No se proporcionó ninguna URL'}), 400
-
         parsed_url = validate_public_url(url)
         content, content_type, final_url = fetch_public_url(url)
-        extension = extension_for_url_content(final_url, content_type)
-        result = markitdown.convert_stream(BytesIO(content), file_extension=extension, url=final_url)
-        markdown_text = result.text_content
-
-        if not markdown_text or not markdown_text.strip():
-            return jsonify({'error': 'No se pudo extraer contenido de la URL proporcionada'}), 400
-
-        # Generate a descriptive filename
-        domain = parsed_url.netloc.replace('.', '_')
-        title = result.title or domain or "url"
-
-        # Sanitize title
-        title = re.sub(r'[^\w\s-]', '', title)
-        title = re.sub(r'[-\s]+', '-', title).strip('-')
-        if not title:
-            title = 'enlace'
-
-        return jsonify({
-            'success': True,
-            'download_name': f"{title}.md",
-            'markdown': markdown_text,
-        })
+        result = convert_bytes(content, extension_for_url_content(final_url, content_type), url=final_url)
+        title, _ = filename_parts(result.title or parsed_url.netloc.replace('.', '_'))
+        return jsonify({'success': True, 'download_name': f'{title}.md', 'markdown': result.text_content})
     except ValueError as error:
         return jsonify({'error': str(error)}), 400
     except requests.RequestException:
@@ -515,6 +182,7 @@ def convert_url():
     except Exception as error:
         app.logger.exception('URL conversion failed: %s', error)
         return jsonify({'error': 'No se ha podido convertir la URL.'}), 500
+
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=False)

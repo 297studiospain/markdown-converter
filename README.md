@@ -2,14 +2,13 @@
 
 A privacy-first web interface for converting documents and public web pages into Markdown. Files are processed only when the download is requested: neither the original upload nor the generated Markdown is stored on the server.
 
-Built with a Next.js interface, a small Flask API and [MarkItDown](https://github.com/microsoft/markitdown). OCR support is included for scanned PDFs and images.
+Built with a Next.js interface, a small Flask API and [MarkItDown](https://github.com/microsoft/markitdown).
 
 ## What it can convert
 
 - Documents: PDF, DOCX, RTF, TXT, HTML and HTM
 - Spreadsheets and presentations: XLS, XLSX and PPTX
-- Images and scans: PNG, JPG, JPEG, BMP, TIFF and WEBP (via OCR)
-- Audio: MP3 and WAV (when the local conversion dependencies are available)
+- Images: PNG, JPG, JPEG, BMP, TIFF and WEBP
 - Public HTTP(S) URLs
 
 The output is shown in the browser and immediately downloaded as a `.md` file. The converter tries to preserve document structure, including headings (`H1` to `H6`), paragraphs, lists, quotes and tables where the source material provides that information.
@@ -20,10 +19,10 @@ The output is shown in the browser and immediately downloaded as a `.md` file. T
 Browser (Next.js, port 3000)
         │  /api/* proxy
         ▼
-Flask API (port 5000) ──► MarkItDown / OCR ──► Markdown response ──► browser download
+Flask API (port 5000) ──► MarkItDown ──► Markdown response ──► browser download
 ```
 
-Uploaded documents are placed in an operating-system temporary directory only for conversion, then removed automatically. Generated Markdown is kept in browser memory until it is downloaded.
+Files are converted directly in memory. Generated Markdown is kept in browser memory until it is downloaded.
 
 ## Run locally
 
@@ -73,7 +72,7 @@ For local development, Next.js proxies `/api/*` to `http://127.0.0.1:5000`. On V
 
 Import this repository with the **Root Directory** left empty. Vercel installs the JavaScript dependencies, detects the Next.js interface and packages `api/index.py` with the packages in `requirements.txt`. Each push to `main` then creates a new production deployment.
 
-Vercel Functions have execution-time and bundle-size limits. Small documents and normal web pages are appropriate for this deployment; very large or OCR-heavy conversions are better hosted on a dedicated Python service.
+Vercel Functions have execution-time and bundle-size limits. Small documents and normal web pages are appropriate for this deployment; very large conversions are better hosted on a dedicated Python service.
 
 ## API
 
