@@ -2,8 +2,10 @@ import ipaddress
 import os
 import re
 import socket
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from io import BytesIO
+from statistics import median
+from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
 from urllib.parse import urljoin, urlparse
@@ -127,11 +129,167 @@ def extension_for_url_content(url, content_type):
     return suffix if suffix in ALLOWED_EXTENSIONS else CONTENT_TYPE_EXTENSIONS.get(content_type, '.html')
 
 
+def normalized_ocr_text(text):
+    return re.sub(r'\s+', ' ', str(text)).strip()
+
+
+def uppercase_ratio(text):
+    letters = [character for character in text if character.isalpha()]
+    return sum(character.isupper() for character in letters) / len(letters) if letters else 0
+
+
+def cluster_heading_sizes(sizes):
+    """Map visually distinct font-size groups to Markdown H1-H6."""
+    clusters = []
+    for size in sorted(sizes, reverse=True):
+        if not clusters or abs(size - clusters[-1][0]) / clusters[-1][0] > 0.12:
+            clusters.append([size])
+        else:
+            clusters[-1].append(size)
+    return {
+        round(size, 1): min(index + 1, 6)
+        for index, cluster in enumerate(clusters[:6])
+        for size in cluster
+    }
+
+
+def markdown_from_ocr_output(result, repeated_texts=None):
+    boxes = getattr(result, 'boxes', None)
+    texts = getattr(result, 'txts', None)
+    scores = getattr(result, 'scores', None)
+    if boxes is None or texts is None:
+        return ''
+
+    repeated_texts = repeated_texts or set()
+    items = []
+    for index, (box, raw_text) in enumerate(zip(boxes, texts)):
+        text = normalized_ocr_text(raw_text)
+        score = scores[index] if scores is not None else 1
+        if (not text or score < 0.45 or text.casefold() in repeated_texts
+                or (len(text) == 1 and not text.isalnum())):
+            continue
+        x_values = [point[0] for point in box]
+        y_values = [point[1] for point in box]
+        items.append({
+            'text': text,
+            'x': min(x_values),
+            'y': min(y_values),
+            'height': max(y_values) - min(y_values),
+            'bottom': max(y_values),
+        })
+    if not items:
+        return ''
+
+    items.sort(key=lambda item: (item['y'], item['x']))
+    body_sizes = [item['height'] for item in items
+                  if len(item['text']) >= 30 and uppercase_ratio(item['text']) < 0.75]
+    body_size = median(body_sizes or [item['height'] for item in items]) or 1
+    for item in items:
+        item['is_heading'] = (
+            3 < len(item['text']) <= 120
+            and not re.fullmatch(r'[\d\W]+', item['text'])
+            and (uppercase_ratio(item['text']) >= 0.85
+                 or (len(item['text']) <= 60 and item['height'] >= body_size * 1.35))
+        )
+    heading_sizes = {round(item['height'], 1) for item in items if item['is_heading']}
+    heading_levels = cluster_heading_sizes(heading_sizes)
+
+    blocks = []
+    paragraph = []
+    previous = None
+
+    def flush_paragraph():
+        if paragraph:
+            blocks.append(' '.join(paragraph))
+            paragraph.clear()
+
+    for item in items:
+        text = item['text']
+        level = heading_levels.get(round(item['height'], 1)) if item['is_heading'] else None
+        if level:
+            flush_paragraph()
+            blocks.append(f"{'#' * level} {text}")
+        elif re.match(r'^(?:[-*+•‣▪]|\d+[.)])\s+', text):
+            flush_paragraph()
+            blocks.append(re.sub(r'^(?:[-*+•‣▪])\s*', '- ', text))
+        elif text.startswith(('“', '"', '«')) and text.endswith(('”', '"', '»')):
+            flush_paragraph()
+            blocks.append(f'> {text}')
+        else:
+            if previous:
+                vertical_gap = item['y'] - previous['bottom']
+                horizontal_shift = abs(item['x'] - previous['x'])
+                if vertical_gap > body_size * 1.8 or horizontal_shift > body_size * 5:
+                    flush_paragraph()
+            paragraph.append(text)
+        previous = item
+
+    flush_paragraph()
+    return '\n\n'.join(blocks)
+
+
+def repeated_ocr_texts(results):
+    counts = Counter()
+    for result in results:
+        for text in getattr(result, 'txts', None) or []:
+            normalized = normalized_ocr_text(text).casefold()
+            if 2 < len(normalized) < 80:
+                counts[normalized] += 1
+    minimum_repetitions = max(3, len(results) // 3)
+    return {text for text, count in counts.items() if count >= minimum_repetitions}
+
+
+def ocr_text_from_file(file_path, extension):
+    """Extract structured visual text without retaining the upload."""
+    from rapidocr import RapidOCR
+
+    engine = RapidOCR()
+    if extension == '.pdf':
+        import pymupdf
+
+        document = pymupdf.open(file_path)
+        results = []
+        try:
+            for page in document:
+                image = page.get_pixmap(matrix=pymupdf.Matrix(1, 1), alpha=False).tobytes('png')
+                results.append(engine(image))
+        finally:
+            document.close()
+        repeated_texts = repeated_ocr_texts(results)
+        pages = [markdown_from_ocr_output(result, repeated_texts) for result in results]
+        return '\n\n---\n\n'.join(page for page in pages if page)
+
+    return markdown_from_ocr_output(engine(file_path))
+
+
+def should_run_ocr(markdown_text, extension, content):
+    if extension in {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}:
+        return len(markdown_text.strip()) < 40
+    if extension != '.pdf':
+        return False
+    try:
+        from pypdf import PdfReader
+
+        page_count = len(PdfReader(BytesIO(content)).pages)
+    except Exception:
+        page_count = 1
+    return len(markdown_text.strip()) < max(300, page_count * 40)
+
+
 def convert_bytes(content, extension, url=None):
     result = markitdown.convert_stream(BytesIO(content), file_extension=extension, url=url)
-    if not result.text_content or not result.text_content.strip():
+    markdown_text = result.text_content or ''
+    if url is None and should_run_ocr(markdown_text, extension, content):
+        with TemporaryDirectory(prefix='markitdown-') as temp_dir:
+            file_path = os.path.join(temp_dir, f'upload{extension}')
+            with open(file_path, 'wb') as temporary_file:
+                temporary_file.write(content)
+            ocr_text = ocr_text_from_file(file_path, extension)
+        if ocr_text:
+            markdown_text = ocr_text
+    if not markdown_text.strip():
         raise ValueError('No se ha podido extraer texto de este archivo. Comprueba que no esté protegido con contraseña o dañado.')
-    return result
+    return result, markdown_text
 
 
 @app.route('/api/convert', methods=['POST'])
@@ -155,8 +313,8 @@ def convert_file():
     if not content:
         return jsonify({'error': 'El archivo está vacío.'}), 400
     try:
-        result = convert_bytes(content, extension)
-        return jsonify({'success': True, 'download_name': f'{title}.md', 'markdown': result.text_content})
+        _result, markdown_text = convert_bytes(content, extension)
+        return jsonify({'success': True, 'download_name': f'{title}.md', 'markdown': markdown_text})
     except ValueError as error:
         return jsonify({'error': str(error)}), 422
     except Exception as error:
@@ -172,9 +330,9 @@ def convert_url():
             return jsonify({'error': 'No se proporcionó ninguna URL'}), 400
         parsed_url = validate_public_url(url)
         content, content_type, final_url = fetch_public_url(url)
-        result = convert_bytes(content, extension_for_url_content(final_url, content_type), url=final_url)
+        result, markdown_text = convert_bytes(content, extension_for_url_content(final_url, content_type), url=final_url)
         title, _ = filename_parts(result.title or parsed_url.netloc.replace('.', '_'))
-        return jsonify({'success': True, 'download_name': f'{title}.md', 'markdown': result.text_content})
+        return jsonify({'success': True, 'download_name': f'{title}.md', 'markdown': markdown_text})
     except ValueError as error:
         return jsonify({'error': str(error)}), 400
     except requests.RequestException:

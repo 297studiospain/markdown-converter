@@ -64,6 +64,16 @@ body {
 .output-head { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .code { height: min(260px, 42vh); min-height: 180px; margin: 0; padding: 18px 23px; overflow: auto; background: #1c1c1b; color: #eeece6; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55; white-space: pre-wrap; }
 
+.error-backdrop { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; padding: 20px; background: rgb(21 21 21 / .7); }
+.error-dialog { width: min(100%, 460px); padding: 28px; border: 1px solid var(--ink); background: var(--paper); box-shadow: 8px 8px 0 var(--orange); }
+.error-label { margin: 0 0 12px; color: var(--orange); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.error-dialog h2 { margin: 0; font-family: var(--display); font-size: 38px; line-height: .9; text-transform: uppercase; }
+.error-dialog > p { font-size: 14px; line-height: 1.45; }
+.error-reference { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: #e7e2d9; font-size: 11px; text-transform: uppercase; }
+.error-reference code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.error-help { color: var(--muted); }
+.error-close { width: 100%; padding: 12px; border: 0; background: var(--ink); color: #fff; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+
 @media (max-width: 760px) {
   .shell { display: block; }
   .sidebar { display: block; min-height: 0; height: auto; padding: 15px; }
@@ -79,4 +89,5 @@ body {
   .url-box input { font-size: 18px; }
   .url-box button { padding: 0 12px; }
   .code { height: 230px; min-height: 160px; }
+  .error-dialog { padding: 24px; }
 }

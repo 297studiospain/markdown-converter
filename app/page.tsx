@@ -4,8 +4,9 @@ import { ChangeEvent, DragEvent, useRef, useState } from "react";
 import packageMetadata from "../package.json";
 
 type Mode = "file" | "url";
+type ErrorNotice = { id: string; message: string };
 
-const emptyMarkdown = `# Ready when you are\n\nDrop a document or paste a URL to turn it into clean Markdown.\n\n- PDF, Word, Excel and PowerPoint\n- Images supported by MarkItDown\n- Web pages and links`;
+const emptyMarkdown = `# Ready when you are\n\nDrop a document or paste a URL to turn it into clean Markdown.\n\n- PDF, Word, Excel and PowerPoint\n- Images and visual PDFs with OCR\n- Web pages and links`;
 const appVersion = `v${packageMetadata.version.split(".")[0]}`;
 
 export default function Home() {
@@ -15,6 +16,7 @@ export default function Home() {
   const [isBusy, setIsBusy] = useState(false);
   const [url, setUrl] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [errorNotice, setErrorNotice] = useState<ErrorNotice | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const downloadMarkdown = (content: string, filename: string) => {
@@ -27,6 +29,7 @@ export default function Home() {
   };
 
   const handleConversion = async (endpoint: string, body: FormData | string, headers?: HeadersInit, defaultName = "document.md") => {
+    setErrorNotice(null);
     setIsBusy(true);
     setStatus("Converting…");
     try {
@@ -35,15 +38,25 @@ export default function Home() {
         headers,
         body,
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Conversion failed");
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(data?.error || `El servidor no ha podido convertir el archivo (${response.status}).`);
+      }
+      if (!data || typeof data.markdown !== "string") {
+        throw new Error("La conversión no ha devuelto un archivo Markdown válido.");
+      }
       const filename = data.download_name || defaultName;
       setMarkdown(data.markdown);
       downloadMarkdown(data.markdown, filename);
       setSelectedFile(null);
       setStatus(`Downloaded ${filename}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Conversion failed");
+      const message = error instanceof Error ? error.message : "No se ha podido convertir el archivo.";
+      setStatus(message);
+      setErrorNotice({
+        id: `ERR-${Date.now().toString(36).toUpperCase()}`,
+        message,
+      });
     } finally {
       setIsBusy(false);
     }
@@ -110,7 +123,7 @@ export default function Home() {
         </a>
         <div className="sidebar-label">Private conversion</div>
         <p className="empty-history">Files are processed only to create your download. Nothing is kept on the server.</p>
-        <div className="sidebar-footer">No history · No accounts<br />Powered by MarkItDown</div>
+        <div className="sidebar-footer">No history · No accounts<br />Powered by MarkItDown + OCR</div>
       </aside>
 
       <section className="workspace" id="top">
@@ -175,6 +188,22 @@ export default function Home() {
           <pre className="code"><code>{markdown}</code></pre>
         </section>
       </section>
+
+      {errorNotice && (
+        <div className="error-backdrop" role="presentation">
+          <section className="error-dialog" role="alertdialog" aria-modal="true" aria-labelledby="error-title" aria-describedby="error-description">
+            <p className="error-label">Conversion error</p>
+            <h2 id="error-title">No se ha podido convertir el archivo</h2>
+            <p id="error-description">{errorNotice.message}</p>
+            <div className="error-reference">
+              <span>Referencia</span>
+              <code>{errorNotice.id}</code>
+            </div>
+            <p className="error-help">Haz una captura de esta ventana y envíasela al administrador, incluyendo la referencia del error.</p>
+            <button className="error-close" type="button" onClick={() => setErrorNotice(null)}>Cerrar</button>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

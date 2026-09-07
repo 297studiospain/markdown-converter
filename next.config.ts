@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  experimental: {
+    // Next.js buffers proxy requests locally. Keep this above Flask's 20 MB
+    // file limit so multipart boundaries do not truncate valid uploads.
+    proxyClientMaxBodySize: "25mb",
+  },
   async rewrites() {
     // In production Vercel sends /api/* to api/index.py. Locally, the
     // separate Flask process remains available at port 5000 for `npm run dev`.
