@@ -8,6 +8,8 @@ type ErrorNotice = { id: string; message: string };
 
 const emptyMarkdown = `# Ready when you are\n\nDrop a document or paste a URL to turn it into clean Markdown.\n\n- PDF, Word, Excel and PowerPoint\n- Images and visual PDFs with OCR\n- Web pages and links`;
 const appVersion = `v${packageMetadata.version.split(".")[0]}`;
+const VERCEL_SAFE_PDF_BYTES = 3_400_000;
+const LARGE_PDF_BYTES = 4 * 1024 * 1024;
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("file");
@@ -62,7 +64,75 @@ export default function Home() {
     }
   };
 
+  const canvasBlob = (canvas: HTMLCanvasElement, quality: number) => new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("No se ha podido preparar una página del PDF.")), "image/jpeg", quality);
+  });
+
+  const renderPdfPages = async (file: File) => {
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+    const pdfDocument = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    if (pdfDocument.numPages > 50) {
+      throw new Error("El PDF supera el máximo de 50 páginas para conversión web.");
+    }
+
+    const pageBudget = Math.max(45_000, Math.floor(VERCEL_SAFE_PDF_BYTES / pdfDocument.numPages));
+    const pageImages: File[] = [];
+    const presets = [[1.2, 0.78], [1, 0.7], [0.85, 0.62], [0.7, 0.52]] as const;
+    try {
+      for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+        setStatus(`Preparing page ${pageNumber} of ${pdfDocument.numPages}…`);
+        const page = await pdfDocument.getPage(pageNumber);
+        let image: Blob | null = null;
+        for (const [scale, quality] of presets) {
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          if (!canvas.getContext("2d", { alpha: false })) throw new Error("Tu navegador no puede preparar el PDF.");
+          await page.render({ canvas, viewport }).promise;
+          const candidate = await canvasBlob(canvas, quality);
+          if (candidate.size <= pageBudget || scale === presets[presets.length - 1][0]) {
+            image = candidate;
+            break;
+          }
+        }
+        if (!image) throw new Error("No se ha podido preparar una página del PDF.");
+        pageImages.push(new File([image], `page-${String(pageNumber).padStart(3, "0")}.jpg`, { type: "image/jpeg" }));
+      }
+    } finally {
+      await pdfDocument.destroy();
+    }
+    const totalBytes = pageImages.reduce((total, page) => total + page.size, 0);
+    if (totalBytes > VERCEL_SAFE_PDF_BYTES) {
+      throw new Error("Este PDF no se puede comprimir lo suficiente para la conversión web. Divídelo en archivos más pequeños.");
+    }
+    return pageImages;
+  };
+
+  const convertLargePdf = async (file: File) => {
+    setErrorNotice(null);
+    setIsBusy(true);
+    try {
+      const pageImages = await renderPdfPages(file);
+      const form = new FormData();
+      form.append("pdf_pages", "1");
+      form.append("source_name", file.name);
+      pageImages.forEach((page) => form.append("file", page));
+      await handleConversion("/api/convert", form, undefined, dataFilename(file.name));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se ha podido preparar el PDF.";
+      setStatus(message);
+      setErrorNotice({ id: `ERR-${Date.now().toString(36).toUpperCase()}`, message });
+      setIsBusy(false);
+    }
+  };
+
   const convertFile = async (file: File) => {
+    if (file.type === "application/pdf" && file.size > LARGE_PDF_BYTES) {
+      await convertLargePdf(file);
+      return;
+    }
     setStatus(`Converting ${file.name}…`);
     const form = new FormData();
     form.append("file", file);

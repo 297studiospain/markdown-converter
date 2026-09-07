@@ -72,7 +72,7 @@ For local development, Next.js proxies `/api/*` to `http://127.0.0.1:5000`. On V
 
 Import this repository with the **Root Directory** left empty. Vercel installs the JavaScript dependencies, detects the Next.js interface and packages `api/index.py` with the packages in `requirements.txt`. Each push to `main` then creates a new production deployment.
 
-Vercel Functions have execution-time and bundle-size limits. OCR is configured with a 60-second maximum duration; very large or unusually complex conversions are better hosted on a dedicated Python service.
+Vercel Functions have execution-time and bundle-size limits. OCR is configured with a 60-second maximum duration. PDFs larger than 4 MB are rendered page by page in the browser and sent as a single compressed image batch below Vercel's function payload limit; neither the original PDF nor the rendered pages are retained after conversion.
 
 ## API
 

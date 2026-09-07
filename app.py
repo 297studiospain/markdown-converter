@@ -20,6 +20,10 @@ app.config.update(MAX_CONTENT_LENGTH=20 * 1024 * 1024)
 
 UPLOAD_COOLDOWN_SECONDS = 15
 MAX_TRACKED_CLIENTS = 10_000
+MAX_PDF_PAGE_IMAGES = 50
+# Vercel Functions reject a request body above 4.5 MB. Leave room for
+# multipart metadata so browser-rendered PDF pages can be sent safely.
+MAX_PDF_PAGE_PAYLOAD_BYTES = 3_800_000
 MAX_URL_BYTES = 10 * 1024 * 1024
 MAX_REDIRECTS = 3
 ALLOWED_EXTENSIONS = {
@@ -262,6 +266,21 @@ def ocr_text_from_file(file_path, extension):
     return markdown_from_ocr_output(engine(file_path))
 
 
+def ocr_text_from_page_images(page_images):
+    """OCR browser-rendered PDF pages using one engine per conversion."""
+    from rapidocr import RapidOCR
+
+    engine = RapidOCR()
+    pages = []
+    for image in page_images:
+        page_markdown = markdown_from_ocr_output(engine(image))
+        if page_markdown:
+            pages.append(page_markdown)
+    if not pages:
+        raise ValueError('No se ha podido extraer texto de las páginas del PDF.')
+    return '\n\n---\n\n'.join(pages)
+
+
 def should_run_ocr(markdown_text, extension, content):
     if extension in {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}:
         return len(markdown_text.strip()) < 40
@@ -294,11 +313,43 @@ def convert_bytes(content, extension, url=None):
 
 @app.route('/api/convert', methods=['POST'])
 def convert_file():
-    if 'file' not in request.files:
+    uploaded_files = request.files.getlist('file')
+    if not uploaded_files:
         return jsonify({'error': 'No se proporcionó ningún archivo'}), 400
-    uploaded_file = request.files['file']
-    if not uploaded_file.filename:
+    if not uploaded_files[0].filename:
         return jsonify({'error': 'Nombre de archivo vacío'}), 400
+
+    is_pdf_pages = request.form.get('pdf_pages') == '1'
+    if is_pdf_pages:
+        if len(uploaded_files) > MAX_PDF_PAGE_IMAGES:
+            return jsonify({'error': f'El PDF supera el máximo de {MAX_PDF_PAGE_IMAGES} páginas para conversión web.'}), 400
+        title, _extension = filename_parts(request.form.get('source_name', 'documento.pdf'))
+        remaining = upload_cooldown_remaining(request.remote_addr or 'unknown')
+        if remaining:
+            response = jsonify({'error': f'Espera {remaining} segundos antes de subir otro archivo.', 'retry_after_seconds': remaining})
+            response.headers['Retry-After'] = str(remaining)
+            return response, 429
+        try:
+            page_images = []
+            for uploaded_file in uploaded_files:
+                _page_title, extension = filename_parts(uploaded_file.filename)
+                if extension not in {'.jpg', '.jpeg', '.png', '.webp'}:
+                    raise ValueError('Las páginas del PDF no tienen un formato de imagen válido.')
+                content = uploaded_file.read()
+                if not content:
+                    raise ValueError('Una de las páginas del PDF está vacía.')
+                page_images.append(content)
+            if sum(len(image) for image in page_images) > MAX_PDF_PAGE_PAYLOAD_BYTES:
+                raise ValueError('Las páginas del PDF son demasiado pesadas para la conversión web.')
+            markdown_text = ocr_text_from_page_images(page_images)
+            return jsonify({'success': True, 'download_name': f'{title}.md', 'markdown': markdown_text})
+        except ValueError as error:
+            return jsonify({'error': str(error)}), 422
+        except Exception as error:
+            app.logger.exception('Rendered PDF conversion failed: %s', error)
+            return jsonify({'error': 'No se han podido convertir las páginas del PDF.'}), 500
+
+    uploaded_file = uploaded_files[0]
 
     title, extension = filename_parts(uploaded_file.filename)
     if extension not in ALLOWED_EXTENSIONS:
